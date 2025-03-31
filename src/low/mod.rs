@@ -1,2 +1,3 @@
 pub mod idor;
-pub mod xss;
+pub mod xss_reflected;
+pub mod xss_stored;
