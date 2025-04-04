@@ -4,11 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-<<<<<<< HEAD
 futures = "0.3.31"
-=======
 rand = "0.9.0"
->>>>>>> e844e98 (merging)
 reqwest = { version = "0.12.15", features = ["blocking"] }
 scraper = "0.23.1"
 serde = { version = "*", features = ["derive"] }

