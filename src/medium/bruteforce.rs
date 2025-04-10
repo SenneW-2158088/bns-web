@@ -153,7 +153,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let mut sess_ids = Vec::new();
 
-    while sess_ids.len() < 1000 {
+    let am_session_ids = 100;
+    while sess_ids.len() < am_session_ids {
+        println!("Generated: {}, Remaining: {}", sess_ids.len(), am_session_ids - sess_ids.len());
         match generate_sess_id(&client).await {
             Ok(sess_id) => sess_ids.push(sess_id),
             Err(e) => {
@@ -163,8 +165,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    println!("Generated {} session ids", sess_ids.len());
+
     let mut handles = Vec::new();
-    let chunk_size = 1000;
+    let chunk_size = 100;
     for (chunk_index, chunk) in passwords.chunks(chunk_size).enumerate() {
         use std::time::Instant;
 
